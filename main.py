@@ -1,154 +1,86 @@
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from transformers import ViTImageProcessor, DistilBertTokenizer
-from sklearn.metrics import classification_report, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
+from unsloth import FastLanguageModel
+from transformers import ViTImageProcessor, BertTokenizer, Trainer, TrainingArguments
+from models.model import ViT_BERT_Llama_VLM  
+from local_datasets.dataset import MedicalVLMDataset 
 import pandas as pd
-import numpy as np
 import os
 
-# Kendi dosyalarımız
-from data.data_loading import get_kvasir_data, get_train_val_split
-from local_datasets.dataset import KvasirHFDataset
-from models.model import ViT_BERT_CoAttention_VQA
-
-# --- 1. GRAFİK ÇİZME VE KAYDETME FONKSİYONU ---
-def plot_confusion_matrix(y_true, y_pred, classes):
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(20, 18)) 
-    sns.heatmap(cm, annot=False, fmt='d', cmap='Blues') 
-    plt.xlabel('Tahmin Edilen')
-    plt.ylabel('Gerçek Olan')
-    plt.title('ViT + BERT Confusion Matrix (Isı Haritası)')
-    plt.savefig("confusion_matrix.png", dpi=300)
-    print("📊 Karmaşıklık matrisi 'confusion_matrix.png' olarak kaydedildi.")
-
-# --- 2. MUHAKEME VE TUTARLILIK ANALİZ FONKSİYONU ---
-def analyze_model_logic(all_preds, all_labels, answer_map):
-    # ID'leri isimlere geri çevir
-    inv_map = {v: k for k, v in answer_map.items()}
-    
-    results = []
-    for p, l in zip(all_preds, all_labels):
-        results.append({
-            'predict': inv_map[p],
-            'actual': inv_map[l]
-        })
-    
-    df_res = pd.DataFrame(results)
-    
-    # --- FACTUAL CONSISTENCY (OLGUSAL TUTARLILIK) ---
-    # Kural: Eğer cevap bir 'boyut' ise, gerçekte bir nesne (polip vb.) olmalı.
-    size_labels = ['<5mm', '5-10mm', '11-20mm', '>20mm']
-    consistency_errors = df_res[
-        (df_res['predict'].isin(size_labels)) & (df_res['actual'] == 'none')
-    ]
-    
-    # --- REASONING QUALITY (MUHAKEME KALİTESİ) ---
-    # Kural: Gastroskopi bulguları kolonoskopi bölgeleriyle (cecum vb.) karışmamalı.
-    reasoning_errors = df_res[
-        (df_res['predict'] == 'cecum') & 
-        (df_res['actual'].isin(['gastroscopy', 'oesophagitis', 'z-line']))
-    ]
-    
-    total = len(df_res)
-    cons_score = 100 - (len(consistency_errors) / total * 100) if total > 0 else 0
-    reason_score = 100 - (len(reasoning_errors) / total * 100) if total > 0 else 0
-    
-    print("\n" + "="*35)
-    print("🧠 MUHAKEME VE TUTARLILIK ANALİZİ")
-    print("="*35)
-    print(f"✅ Factual Consistency Skoru: %{cons_score:.2f}")
-    print(f"🧩 Reasoning Quality Skoru:   %{reason_score:.2f}")
-    print(f"Toplam Analiz Edilen Örnek:  {total}")
-    print(f"Tespit Edilen Mantık Hatası: {len(consistency_errors) + len(reasoning_errors)}")
-    print("="*35 + "\n")
-
-# --- 3. ANA ÇALIŞTIRICI ---
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--- ViT + BERT Modeli Başlatılıyor (Cihaz: {device}) ---")
-
-    # HAZIRLIK
-    feature_extractor = ViTImageProcessor.from_pretrained('google/vit-base-patch16-224-in21k')
-    tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-
-    raw_data = get_kvasir_data()
-    train_data, val_data = get_train_val_split(raw_data)
+    # 1. KONFİGÜRASYON
+    max_seq_length = 2048 
+    load_in_4bit = True 
     
-    answers_list = train_data['answer']
-    all_answers = sorted(list(set(str(ans).lower() for ans in answers_list)))
-    answer_map = {ans: i for i, ans in enumerate(all_answers)}
-    label_names = list(answer_map.keys())
-
-    # DATASET & LOADER
-    train_ds = KvasirHFDataset(train_data, answer_map)
-    val_ds = KvasirHFDataset(val_data, answer_map)
-
-    def collate_fn(batch):
-        img_inputs = feature_extractor(images=[item['image'] for item in batch], return_tensors="pt")
-        txt_inputs = tokenizer([item['question'] for item in batch], padding=True, truncation=True, max_length=20, return_tensors="pt")
-        labels = torch.stack([item['answer'] for item in batch])
-        return img_inputs['pixel_values'], txt_inputs['input_ids'], txt_inputs['attention_mask'], labels
-
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, collate_fn=collate_fn, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, collate_fn=collate_fn, num_workers=2)
-
-    # MODEL & EĞİTİM
-    model = ViT_BERT_CoAttention_VQA(num_classes=len(answer_map)).to(device)
-    if torch.cuda.device_count() > 1: model = nn.DataParallel(model)
+    print("🚀 Modeller yükleniyor (Llama 3.1 + ViT + BERT)...")
     
-    optimizer = optim.AdamW(model.parameters(), lr=5e-5)
-    criterion = nn.CrossEntropyLoss()
-    MODEL_PATH = "vit_bert_model.pth"
-    
-    if os.path.exists(MODEL_PATH):
-        print(f"✅ Model yüklendi: {MODEL_PATH}")
-        model.load_state_dict(torch.load(MODEL_PATH), strict=False)
+    # 2. LLAMA YÜKLEME (Unsloth)
+    llama_model, llama_tokenizer = FastLanguageModel.from_pretrained(
+        model_name = "unsloth/Meta-Llama-3.1-8B-Instruct",
+        max_seq_length = max_seq_length,
+        load_in_4bit = load_in_4bit,
+    )
+
+    # Llama'ya LoRA adaptörlerini ekle
+    llama_model = FastLanguageModel.get_peft_model(
+        llama_model,
+        r = 16,
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha = 16,
+        lora_dropout = 0,
+        bias = "none",
+    )
+
+    # 3. HİBRİT VLM MODELİNİ OLUŞTUR
+    # model.py dosyasındaki ViT_BERT_Llama_VLM sınıfını kullanıyoruz
+    model = ViT_BERT_Llama_VLM(llama_model, llama_tokenizer).to("cuda")
+
+    # Processor ve Tokenizer'ları hazırla
+    vit_processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+    bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    llama_tokenizer.pad_token = llama_tokenizer.eos_token
+
+    # 4. VERİ SETİ (CSV dosyanın yolunu buraya yaz)
+    # csv dosyasında 'image_path', 'question' ve 'answer' sütunları olmalı
+    if os.path.exists("data/kvasir_vqa.csv"):
+        df = pd.read_csv("data/kvasir_vqa.csv")
+        train_ds = MedicalVLMDataset(df, vit_processor, bert_tokenizer, llama_tokenizer)
     else:
-        print("--- Eğitim Başlıyor ---")
-        for epoch in range(3):
-            model.train()
-            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-            for pv, ii, am, lb in loop:
-                pv, ii, am, lb = pv.to(device), ii.to(device), am.to(device), lb.to(device)
-                optimizer.zero_grad()
-                loss = criterion(model(pv, ii, am), lb)
-                loss.backward()
-                optimizer.step()
-        torch.save(model.state_dict(), MODEL_PATH)
+        print("❌ Hata: 'data/kvasir_vqa.csv' bulunamadı!")
+        return
 
-    # TEST AŞAMASI
-    print("\n--- Test Aşaması ---")
-    model.eval()
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for pv, ii, am, lb in tqdm(val_loader):
-            outputs = model(pv.to(device), ii.to(device), am.to(device))
-            all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            all_labels.extend(lb.numpy())
+    # 5. EĞİTİM AYARLARI
+    training_args = TrainingArguments(
+        per_device_train_batch_size = 2,
+        gradient_accumulation_steps = 4,
+        warmup_steps = 10,
+        max_steps = 60, # İlk deneme için kısa tutuldu
+        learning_rate = 2e-4,
+        fp16 = not torch.cuda.is_bf16_supported(),
+        bf16 = torch.cuda.is_bf16_supported(),
+        logging_steps = 1,
+        output_dir = "outputs",
+        save_total_limit = 2,
+    )
 
-    # RAPORLAMA (SUPPORT=0 FİLTRELEME)
-    present_label_ids = sorted(list(set(all_labels)))
-    present_label_names = [label_names[i] for i in present_label_ids]
+    # 6. EĞİTİMİ BAŞLAT
+    print("⚡ Eğitim başlıyor...")
+    trainer = Trainer(
+        model = model,
+        train_dataset = train_ds,
+        args = training_args,
+    )
+    
+    trainer.train()
 
-    print("\n--- Raporlar Oluşturuluyor ---")
-    report_text = classification_report(all_labels, all_preds, labels=present_label_ids, target_names=present_label_names, zero_division=0)
-    with open("sonuc_raporu.txt", "w", encoding="utf-8") as f: f.write(report_text)
+    # 7. KAYDETME
+    print("💾 Model kaydediliyor...")
+    model_save_path = "medical_vlm_final"
+    # Sadece eğitilen kısımları (Projection ve LoRA) kaydetmek yeterli
+    torch.save(model.vision_projector.state_dict(), f"{model_save_path}/vision_proj.bin")
+    torch.save(model.bert_projector.state_dict(), f"{model_save_path}/bert_proj.bin")
+    llama_model.save_pretrained(f"{model_save_path}/llama_lora")
     
-    report_dict = classification_report(all_labels, all_preds, labels=present_label_ids, target_names=present_label_names, zero_division=0, output_dict=True)
-    pd.DataFrame(report_dict).transpose().to_csv("detayli_analiz.csv")
-    
-    # MUHAKEME ANALİZİNİ ÇALIŞTIR
-    analyze_model_logic(all_preds, all_labels, answer_map)
-    
-    # MATRİS ÇİZ
-    plot_confusion_matrix(all_labels, all_preds, label_names)
-    print("🎉 TÜM İŞLEMLER TAMAMLANDI!")
+    print(f"✅ İşlem tamamlandı! Model '{model_save_path}' klasörüne kaydedildi.")
 
 if __name__ == "__main__":
     main()

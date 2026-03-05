@@ -1,8 +1,8 @@
 import torch
 from unsloth import FastLanguageModel
 from transformers import ViTImageProcessor, BertTokenizer, Trainer, TrainingArguments
-from models.medical_vlm import ViT_BERT_Llama_VLM
-from local_datasets.vlm_dataset import MedicalVLMDataset
+from models.model import ViT_BERT_Llama_VLM
+from local_datasets.dataset import MedicalVLMDataset
 import pandas as pd
 
 # 1. KONFİGÜRASYON VE MODELLERİN YÜKLENMESİ
