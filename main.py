@@ -1,4 +1,3 @@
-%%writefile vqa_project/main.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,7 +14,7 @@ import os
 # Kendi dosyalarımız
 from data.data_loading import get_kvasir_data, get_train_val_split
 from local_datasets.dataset import KvasirHFDataset
-from models.model import ViT_BERT_VQA
+from models.model import ViT_BERT_CoAttention_VQA
 
 # --- 1. GRAFİK ÇİZME VE KAYDETME FONKSİYONU ---
 def plot_confusion_matrix(y_true, y_pred, classes):
@@ -100,7 +99,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, collate_fn=collate_fn, num_workers=2)
 
     # MODEL & EĞİTİM
-    model = ViT_BERT_VQA(num_classes=len(answer_map)).to(device)
+    model = ViT_BERT_CoAttention_VQA(num_classes=len(answer_map)).to(device)
     if torch.cuda.device_count() > 1: model = nn.DataParallel(model)
     
     optimizer = optim.AdamW(model.parameters(), lr=5e-5)
