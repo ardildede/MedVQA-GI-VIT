@@ -1,30 +1,50 @@
 import torch
 from torch.utils.data import Dataset
+from PIL import Image
 
-class KvasirHFDataset(Dataset):
-    def __init__(self, hf_dataset, answer_map, transform=None):
-        self.dataset = hf_dataset
-        self.transform = transform
-        self.answer_map = answer_map
+class MedicalVLMDataset(Dataset):
+    def __init__(self, dataframe, vit_processor, bert_tokenizer, llama_tokenizer, max_length=128):
+        self.data = dataframe
+        self.vit_processor = vit_processor
+        self.bert_tokenizer = bert_tokenizer
+        self.llama_tokenizer = llama_tokenizer
+        self.max_length = max_length
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        image = item['image'].convert('RGB')
+        row = self.data.iloc[idx]
         
-        # ViT kendi transformunu (FeatureExtractor) kullandığı için
-        # buradaki transform genelde iptal edilir veya basit tutulur.
-        if self.transform:
-            image = self.transform(image)
-            
-        question = item['question']
-        answer = str(item['answer']).lower()
-        label = self.answer_map.get(answer, 0)
+        # 1. GÖRÜNTÜ İŞLEME (ViT için)
+        image = Image.open(row['image_path']).convert("RGB")
+        vit_inputs = self.vit_processor(images=image, return_tensors="pt")
+        pixel_values = vit_inputs.pixel_values.squeeze(0) # [3, 224, 224]
+
+        # 2. SORU İŞLEME (BERT için)
+        question = str(row['question'])
+        bert_inputs = self.bert_tokenizer(
+            question,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+
+        # 3. CEVAP İŞLEME (Llama için Target)
+        # Llama'nın ne üretmesi gerektiğini ona öğretiyoruz
+        answer = str(row['answer'])
+        llama_inputs = self.llama_tokenizer(
+            answer + self.llama_tokenizer.eos_token,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
 
         return {
-            'image': image, # Dönüştürülmüş tensör
-            'question': question, # Ham metin (Collator'da işlenecek)
-            'answer': torch.tensor(label, dtype=torch.long)
+            "pixel_values": pixel_values,
+            "bert_input_ids": bert_inputs.input_ids.squeeze(0),
+            "bert_attention_mask": bert_inputs.attention_mask.squeeze(0),
+            "llama_labels": llama_inputs.input_ids.squeeze(0)
         }
