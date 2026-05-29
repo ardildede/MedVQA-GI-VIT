@@ -1,3 +1,4 @@
+%%writefile local_datasets/dataset.py
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -16,10 +17,10 @@ class MedicalVLMDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
         
-        # 1. GÖRÜNTÜ İŞLEME (ViT için)
+        # 1. GÖRÜNTÜ İŞLEME (RGB Güvencesiyle)
         image = Image.open(row['image_path']).convert("RGB")
         vit_inputs = self.vit_processor(images=image, return_tensors="pt")
-        pixel_values = vit_inputs.pixel_values.squeeze(0) # [3, 224, 224]
+        pixel_values = vit_inputs.pixel_values.squeeze(0) 
 
         # 2. SORU İŞLEME (BERT için)
         question = str(row['question'])
@@ -31,8 +32,7 @@ class MedicalVLMDataset(Dataset):
             return_tensors="pt"
         )
 
-        # 3. CEVAP İŞLEME (Llama için Target)
-        # Llama'nın ne üretmesi gerektiğini ona öğretiyoruz
+        # 3. CEVAP İŞLEME (Llama Target)
         answer = str(row['answer'])
         llama_inputs = self.llama_tokenizer(
             answer + self.llama_tokenizer.eos_token,
